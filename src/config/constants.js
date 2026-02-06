@@ -1,0 +1,58 @@
+const ROLES = Object.freeze({
+  ADMIN: 'ADMIN',
+  SUPERVISOR: 'SUPERVISOR',
+  CREW: 'CREW',
+  CITIZEN: 'CITIZEN'
+});
+
+const CASE_TYPES = Object.freeze({
+  LITTER: 'LITTER',
+  BULKY: 'BULKY',
+  BIN_SERVICE: 'BIN_SERVICE',
+  FOLLOW_UP: 'FOLLOW_UP',
+  // ✅ Routine household pickup (disposal waste)
+  ROUTINE_PICKUP: 'ROUTINE_PICKUP',
+  // ✅ Non-disposal recyclable submission (plastic/glass/iron etc.)
+  RECYCLABLE: 'RECYCLABLE'
+});
+
+const CASE_STATUSES = Object.freeze({
+  PENDING_VALIDATION: 'PENDING_VALIDATION',
+  APPROVED: 'APPROVED',
+  REJECTED: 'REJECTED',
+  SCHEDULED: 'SCHEDULED',
+  IN_PROGRESS: 'IN_PROGRESS',
+  COMPLETED: 'COMPLETED',
+  FAILED: 'FAILED',
+  CANCELLED: 'CANCELLED'
+});
+
+const TASK_STATUSES = Object.freeze({
+  CREATED: 'CREATED',
+  ASSIGNED: 'ASSIGNED',
+  ARRIVED: 'ARRIVED',
+  IN_PROGRESS: 'IN_PROGRESS',
+  COMPLETED: 'COMPLETED',
+  FAILED: 'FAILED',
+  CANCELLED: 'CANCELLED'
+});
+
+const VEHICLE_TYPES = Object.freeze({
+  TRUCK: 'TRUCK',
+  SCOOTER: 'SCOOTER'
+});
+
+const REQUIRED_VEHICLE = Object.freeze({
+  TRUCK: 'TRUCK',
+  SCOOTER: 'SCOOTER',
+  CREW_ONLY: 'CREW_ONLY'
+});
+
+module.exports = {
+  ROLES,
+  CASE_TYPES,
+  CASE_STATUSES,
+  TASK_STATUSES,
+  VEHICLE_TYPES,
+  REQUIRED_VEHICLE
+};

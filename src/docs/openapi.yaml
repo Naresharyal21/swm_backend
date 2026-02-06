@@ -1,0 +1,236 @@
+openapi: 3.0.3
+info:
+  title: Smart Waste Management API
+  version: 1.0.0
+  description: |
+    Smart Waste Management System (Digital Twin + Virtual Bin).
+servers:
+  - url: http://localhost:8080
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register citizen
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Register'
+      responses:
+        '201':
+          description: Created
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Login'
+      responses:
+        '200':
+          description: OK
+  /api/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken:
+                  type: string
+              required: [refreshToken]
+      responses:
+        '200':
+          description: OK
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout (revoke refresh token)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: OK
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+  /api/iot/telemetry:
+    post:
+      tags: [IoT]
+      summary: Ingest bin telemetry (fill %, battery %)
+      parameters:
+        - in: header
+          name: x-iot-key
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Telemetry'
+      responses:
+        '200':
+          description: OK
+  /api/citizen/litter-reports:
+    post:
+      tags: [Citizen]
+      summary: Create litter report
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LitterReport'
+      responses:
+        '201':
+          description: Created
+  /api/citizen/bulky-requests:
+    post:
+      tags: [Citizen]
+      summary: Create bulky pickup request
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkyRequest'
+      responses:
+        '201':
+          description: Created
+  /api/ops/routes/generate:
+    post:
+      tags: [Ops]
+      summary: Generate routes for a date
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                date:
+                  type: string
+                  example: '2026-01-17'
+      responses:
+        '200':
+          description: OK
+  /api/crew/tasks/{id}/proof:
+    post:
+      tags: [Crew]
+      summary: Upload proof image for a task (stored in MinIO/S3)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Created
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Register:
+      type: object
+      properties:
+        email: { type: string }
+        password: { type: string }
+        name: { type: string }
+        phone: { type: string }
+      required: [email, password]
+    Login:
+      type: object
+      properties:
+        email: { type: string }
+        password: { type: string }
+      required: [email, password]
+    Telemetry:
+      type: object
+      properties:
+        binId: { type: string, description: External bin id }
+        ts: { type: string, format: date-time }
+        fillPercent: { type: number, minimum: 0, maximum: 100 }
+        batteryPercent: { type: number, minimum: 0, maximum: 100 }
+      required: [binId, fillPercent]
+    LitterReport:
+      type: object
+      properties:
+        description: { type: string }
+        location:
+          $ref: '#/components/schemas/GeoPoint'
+      required: [location]
+    BulkyRequest:
+      type: object
+      properties:
+        description: { type: string }
+        bulkyWeightKg: { type: number }
+        location:
+          $ref: '#/components/schemas/GeoPoint'
+      required: [location]
+    GeoPoint:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [Point]
+        coordinates:
+          type: array
+          items:
+            type: number
+          minItems: 2
+          maxItems: 2
+          description: [lng, lat]
+      required: [type, coordinates]
