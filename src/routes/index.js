@@ -7,6 +7,7 @@ const iotRoutes = require('./iot.routes');
 const opsRoutes = require('./ops.routes');
 const crewRoutes = require('./crew.routes');
 const filesRoutes = require('./files.routes');
+const esewaRoutes = require("./esewa.routes");
 
 const router = express.Router();
 
@@ -17,5 +18,6 @@ router.use('/iot', iotRoutes);
 router.use('/ops', opsRoutes);
 router.use('/crew', crewRoutes);
 router.use('/files', filesRoutes);
+router.use("/payments/esewa", esewaRoutes);
 
 module.exports = router;

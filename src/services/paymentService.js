@@ -1,157 +1,187 @@
-const axios = require('axios');
-const env = require('../config/env');
-const PaymentIntent = require('../models/PaymentIntent');
-const Invoice = require('../models/Invoice');
-const WalletTransaction = require('../models/WalletTransaction');
+const axios = require("axios");
+const crypto = require("crypto");
+const env = require("../config/env");
 
-const KHALTI_BASE_URL =
-  env.khalti.env === 'production'
-    ? 'https://khalti.com/api/v2'
-    : 'https://dev.khalti.com/api/v2';
+const PaymentIntent = require("../models/PaymentIntent");
+const Invoice = require("../models/Invoice");
+const WalletTransaction = require("../models/WalletTransaction");
+
+// ----------------------------
+// eSewa helpers (ePay v2)
+// ----------------------------
+function signEsewaRequest({ total_amount, transaction_uuid, product_code }) {
+  const message = `total_amount=${total_amount},transaction_uuid=${transaction_uuid},product_code=${product_code}`;
+  return crypto
+    .createHmac("sha256", env.esewa.secretKey)
+    .update(message)
+    .digest("base64");
+}
+
+async function esewaStatusCheck({ product_code, total_amount, transaction_uuid }) {
+  const r = await axios.get(env.esewa.statusUrl, {
+    params: { product_code, total_amount, transaction_uuid },
+    timeout: 15000,
+  });
+  return r.data; // { status, ref_id, ... }
+}
 
 /**
  * Create Payment Intent
+ * provider: ESEWA | MOCK
  */
 async function createPaymentIntent({ userId, invoiceId, provider }) {
   const invoice = await Invoice.findOne({ _id: invoiceId, userId }).lean();
-  if (!invoice) throw new Error('Invoice not found');
+  if (!invoice) throw new Error("Invoice not found");
 
   const amountDue = Number(invoice.amountDue || 0);
-  if (amountDue <= 0) throw new Error('Nothing to pay');
+  if (amountDue <= 0) throw new Error("Nothing to pay");
 
-  // Khalti minimum = Rs 10 = 1000 paisa
-  if (provider === 'KHALTI' && amountDue < 10) {
-    throw new Error('Minimum Khalti payment is Rs. 10');
-  }
+  const normalizedProvider = String(provider || env.payments.provider || "MOCK").toUpperCase();
 
   const intent = await PaymentIntent.create({
     userId,
     invoiceId,
-    provider,
+    provider: normalizedProvider,
     amount: amountDue,
-    status: 'CREATED'
+    status: "CREATED",
   });
 
-  if (provider === 'MOCK') {
-    const paymentUrl = `${env.payment.mockBaseUrl}/mock/payments/${intent._id}`;
+  // ----------------------------
+  // MOCK
+  // ----------------------------
+  if (normalizedProvider === "MOCK") {
+    const paymentUrl = `${env.payments.mockBaseUrl}/mock/payments/${intent._id}`;
     await PaymentIntent.updateOne(
       { _id: intent._id },
-      { $set: { status: 'INITIATED', paymentUrl } }
+      { $set: { status: "INITIATED", paymentUrl } }
     );
     return await PaymentIntent.findById(intent._id).lean();
   }
 
-  if (provider === 'KHALTI') {
-    const payload = {
-      return_url: `${process.env.BASE_URL}/api/payments/khalti/callback`,
-      website_url: process.env.WEBSITE_URL,
-      amount: Math.round(amountDue * 100), // paisa
-      purchase_order_id: String(intent._id), // IMPORTANT: use PaymentIntent ID
-      purchase_order_name: `Waste Bill ${invoice.month || ''}`,
-      customer_info: {
-        name: invoice.customerName || 'Customer',
-        email: invoice.customerEmail || 'example@gmail.com',
-        phone: invoice.customerPhone || '9800000001'
-      }
+  // ----------------------------
+  // ESEWA (web form redirect)
+  // ----------------------------
+  if (normalizedProvider === "ESEWA") {
+    // eSewa typically expects amount formatting; keep 2 decimal safe
+    const amount = Number(amountDue.toFixed(2));
+    const total_amount = amount;
+
+    // Use PaymentIntent ID as transaction UUID (stable + unique)
+    const transaction_uuid = String(intent._id);
+
+    const signed_field_names = "total_amount,transaction_uuid,product_code";
+
+    const signature = signEsewaRequest({
+      total_amount: String(total_amount),
+      transaction_uuid,
+      product_code: env.esewa.productCode,
+    });
+
+    // Your backend callback endpoints
+    const success_url = `${env.apiPublicUrl}/api/payments/esewa/callback/success`;
+    const failure_url = `${env.apiPublicUrl}/api/payments/esewa/callback/failure`;
+
+    // Store fields so frontend can render the form
+    const paymentMeta = {
+      formUrl: env.esewa.formUrl,
+      fields: {
+        amount: String(amount),
+        tax_amount: "0",
+        total_amount: String(total_amount),
+        transaction_uuid,
+        product_code: env.esewa.productCode,
+        product_service_charge: "0",
+        product_delivery_charge: "0",
+        success_url,
+        failure_url,
+        signed_field_names,
+        signature,
+      },
     };
 
-    // If Khalti not configured (dev mode)
-    if (!env.khalti.secretKey) {
-      await PaymentIntent.updateOne(
-        { _id: intent._id },
-        { $set: { status: 'INITIATED', providerPayload: payload } }
-      );
-      return await PaymentIntent.findById(intent._id).lean();
-    }
-
-    const { data } = await axios.post(
-      `${KHALTI_BASE_URL}/epayment/initiate/`,
-      payload,
-      {
-        headers: {
-          Authorization: `Key ${env.khalti.secretKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000
-      }
-    );
+    // Optional "paymentUrl": you can set to your frontend page that auto-submits form
+    const paymentUrl = `${env.websiteUrl}/billing/esewa?intentId=${intent._id}`;
 
     await PaymentIntent.updateOne(
       { _id: intent._id },
       {
         $set: {
-          status: 'INITIATED',
-          providerPayload: data,
-          providerReference: data.pidx,
-          paymentUrl: data.payment_url
-        }
+          status: "INITIATED",
+          providerPayload: paymentMeta,
+          providerReference: transaction_uuid,
+          paymentUrl,
+        },
       }
     );
 
     return await PaymentIntent.findById(intent._id).lean();
   }
 
-  throw new Error('Unsupported payment provider');
+  throw new Error("Unsupported payment provider");
 }
 
 /**
- * Khalti Callback + Lookup Verification
+ * eSewa callback handler (server-side verification)
+ * Call this from a controller that receives:
+ *  - req.query.data (base64 json)
  */
-async function handleKhaltiCallback(pidx) {
-  const intent = await PaymentIntent.findOne({ providerReference: pidx });
-  if (!intent) throw new Error('PaymentIntent not found');
+async function handleEsewaCallback(dataB64) {
+  if (!dataB64) throw new Error("Missing data");
 
-  const { data } = await axios.post(
-    `${KHALTI_BASE_URL}/epayment/lookup/`,
-    { pidx },
-    {
-      headers: {
-        Authorization: `Key ${env.khalti.secretKey}`,
-        'Content-Type': 'application/json'
-      }
-    }
-  );
+  const decoded = Buffer.from(String(dataB64), "base64").toString("utf8");
+  const payload = JSON.parse(decoded);
 
-  // Only Completed = success
-  if (data.status !== 'Completed') {
-    await PaymentIntent.updateOne(
-      { _id: intent._id },
-      { $set: { status: data.status === 'User canceled' ? 'CANCELLED' : 'FAILED' } }
-    );
-    return { success: false, status: data.status };
-  }
+  const transaction_uuid = payload.transaction_uuid; // we used PaymentIntent ID
+  const total_amount = Number(payload.total_amount);
+  const product_code = payload.product_code;
 
-  // Mark intent PAID
+  if (!transaction_uuid) throw new Error("Missing transaction_uuid");
+
+  const intent = await PaymentIntent.findById(transaction_uuid);
+  if (!intent) throw new Error("PaymentIntent not found");
+
+  // Strong verification with status endpoint
+  const statusResp = await esewaStatusCheck({
+    product_code,
+    total_amount,
+    transaction_uuid,
+  });
+
+  const status = statusResp?.status; // COMPLETE / PENDING / etc
+  const ref_id = statusResp?.ref_id;
+
   await PaymentIntent.updateOne(
     { _id: intent._id },
     {
       $set: {
-        status: 'PAID',
-        providerPayload: data
-      }
+        status: status === "COMPLETE" ? "PAID" : status === "PENDING" ? "PENDING" : "FAILED",
+        providerPayload: payload,
+        providerReference: ref_id || intent.providerReference,
+      },
     }
   );
+
+  if (status !== "COMPLETE") {
+    return { success: false, status: status || "UNKNOWN" };
+  }
 
   // Wallet debit
   await WalletTransaction.create({
     userId: intent.userId,
-    type: 'DEBIT',
-    amount: data.total_amount / 100,
-    reason: 'INVOICE_PAYMENT',
-    refType: 'PaymentIntent',
-    refId: intent._id
+    type: "DEBIT",
+    amount: Number(intent.amount),
+    reason: "INVOICE_PAYMENT",
+    refType: "PaymentIntent",
+    refId: intent._id,
   });
 
   // Mark invoice paid
-  await Invoice.updateOne(
-    { _id: intent.invoiceId },
-    { $set: { status: 'PAID' } }
-  );
+  await Invoice.updateOne({ _id: intent.invoiceId }, { $set: { status: "PAID" } });
 
-  return { success: true, transactionId: data.transaction_id };
+  return { success: true, refId: ref_id || null };
 }
 
 module.exports = {
   createPaymentIntent,
-  handleKhaltiCallback
+  handleEsewaCallback,
 };
