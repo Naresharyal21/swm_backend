@@ -51,7 +51,6 @@ const listUsers = asyncHandler(async (req, res) => {
   res.json({ items })
 })
 
-// ✅ Admin UPDATE user (name/phone/isActive/role)
 const updateUser = asyncHandler(async (req, res) => {
   const { id } = req.params
 
@@ -79,7 +78,6 @@ const updateUser = asyncHandler(async (req, res) => {
   res.json({ user })
 })
 
-// ✅ Admin DELETE user (cannot delete self)
 const deleteUser = asyncHandler(async (req, res) => {
   const { id } = req.params
 
@@ -127,8 +125,17 @@ const listZones = asyncHandler(async (req, res) => {
   res.json({ items })
 })
 
+const getZoneById = asyncHandler(async (req, res) => {
+  const zone = await Zone.findById(req.params.id).lean()
+  if (!zone) throw notFound('Zone not found')
+  res.json({ zone })
+})
+
 const updateZone = asyncHandler(async (req, res) => {
-  const zone = await Zone.findByIdAndUpdate(req.params.id, req.body, { new: true }).lean()
+  const zone = await Zone.findByIdAndUpdate(req.params.id, req.body, {
+    new: true,
+    runValidators: true
+  }).lean()
   if (!zone) throw notFound('Zone not found')
 
   await audit({
@@ -178,9 +185,71 @@ const createHousehold = asyncHandler(async (req, res) => {
 const listHouseholds = asyncHandler(async (req, res) => {
   const q = {}
   if (req.query.zoneId) q.zoneId = req.query.zoneId
+  if (req.query.citizenUserId) q.citizenUserId = req.query.citizenUserId
+  if (req.query.planId) q.planId = req.query.planId
 
   const items = await Household.find(q).sort({ createdAt: -1 }).lean()
   res.json({ items })
+})
+
+const getHouseholdById = asyncHandler(async (req, res) => {
+  const household = await Household.findById(req.params.id).lean()
+  if (!household) throw notFound('Household not found')
+  res.json({ household })
+})
+
+const updateHousehold = asyncHandler(async (req, res) => {
+  const { id } = req.params
+
+  const allowed = [
+    'zoneId',
+    'citizenUserId',
+    'address',
+    'location',
+    'planId',
+    'pickupScheduleDays'
+  ]
+  const patch = {}
+  for (const k of allowed) {
+    if (req.body[k] !== undefined) patch[k] = req.body[k]
+  }
+
+  const household = await Household.findByIdAndUpdate(id, patch, {
+    new: true,
+    runValidators: true
+  }).lean()
+  if (!household) throw notFound('Household not found')
+
+  await audit({
+    actorUserId: req.user._id,
+    action: 'ADMIN_UPDATE_HOUSEHOLD',
+    entityType: 'Household',
+    entityId: household._id,
+    meta: { patch },
+    req
+  })
+
+  res.json({ household })
+})
+
+const deleteHousehold = asyncHandler(async (req, res) => {
+  const { id } = req.params
+
+  const household = await Household.findByIdAndDelete(id).lean()
+  if (!household) throw notFound('Household not found')
+
+  // optional: remove bins for this household
+  // await Bin.deleteMany({ householdId: household._id })
+
+  await audit({
+    actorUserId: req.user._id,
+    action: 'ADMIN_DELETE_HOUSEHOLD',
+    entityType: 'Household',
+    entityId: id,
+    req
+  })
+
+  res.json({ status: 'ok' })
 })
 
 // --------------------
@@ -213,6 +282,64 @@ const listBins = asyncHandler(async (req, res) => {
   res.json({ items })
 })
 
+const getBinById = asyncHandler(async (req, res) => {
+  const bin = await Bin.findById(req.params.id).lean()
+  if (!bin) throw notFound('Bin not found')
+  res.json({ bin })
+})
+
+const updateBin = asyncHandler(async (req, res) => {
+  const { id } = req.params
+
+  const allowed = ['binId', 'householdId', 'virtualBinId', 'location', 'status']
+  const patch = {}
+  for (const k of allowed) {
+    if (req.body[k] !== undefined) patch[k] = req.body[k]
+  }
+
+  if (patch.householdId) {
+    const household = await Household.findById(patch.householdId).lean()
+    if (!household) throw notFound('Household not found')
+  }
+
+  const bin = await Bin.findByIdAndUpdate(id, patch, {
+    new: true,
+    runValidators: true
+  }).lean()
+  if (!bin) throw notFound('Bin not found')
+
+  await audit({
+    actorUserId: req.user._id,
+    action: 'ADMIN_UPDATE_BIN',
+    entityType: 'Bin',
+    entityId: bin._id,
+    meta: { patch },
+    req
+  })
+
+  res.json({ bin })
+})
+
+const deleteBin = asyncHandler(async (req, res) => {
+  const { id } = req.params
+
+  const bin = await Bin.findByIdAndDelete(id).lean()
+  if (!bin) throw notFound('Bin not found')
+
+  // remove membership record if any
+  await VirtualBinMember.deleteMany({ binId: id })
+
+  await audit({
+    actorUserId: req.user._id,
+    action: 'ADMIN_DELETE_BIN',
+    entityType: 'Bin',
+    entityId: id,
+    req
+  })
+
+  res.json({ status: 'ok' })
+})
+
 // --------------------
 // Virtual Bins
 // --------------------
@@ -237,6 +364,59 @@ const listVirtualBins = asyncHandler(async (req, res) => {
 
   const items = await VirtualBin.find(q).sort({ createdAt: -1 }).lean()
   res.json({ items })
+})
+
+const getVirtualBinById = asyncHandler(async (req, res) => {
+  const vb = await VirtualBin.findById(req.params.id).lean()
+  if (!vb) throw notFound('Virtual bin not found')
+  res.json({ virtualBin: vb })
+})
+
+const updateVirtualBin = asyncHandler(async (req, res) => {
+  const { id } = req.params
+
+  const allowed = ['name', 'zoneId', 'centroid', 'polygon', 'thresholds', 'isActive']
+  const patch = {}
+  for (const k of allowed) {
+    if (req.body[k] !== undefined) patch[k] = req.body[k]
+  }
+
+  const vb = await VirtualBin.findByIdAndUpdate(id, patch, {
+    new: true,
+    runValidators: true
+  }).lean()
+  if (!vb) throw notFound('Virtual bin not found')
+
+  await audit({
+    actorUserId: req.user._id,
+    action: 'ADMIN_UPDATE_VIRTUAL_BIN',
+    entityType: 'VirtualBin',
+    entityId: vb._id,
+    meta: { patch },
+    req
+  })
+
+  res.json({ virtualBin: vb })
+})
+
+const deleteVirtualBin = asyncHandler(async (req, res) => {
+  const { id } = req.params
+
+  const vb = await VirtualBin.findByIdAndDelete(id).lean()
+  if (!vb) throw notFound('Virtual bin not found')
+
+  await VirtualBinMember.deleteMany({ virtualBinId: id })
+  await Bin.updateMany({ virtualBinId: id }, { $set: { virtualBinId: null } })
+
+  await audit({
+    actorUserId: req.user._id,
+    action: 'ADMIN_DELETE_VIRTUAL_BIN',
+    entityType: 'VirtualBin',
+    entityId: id,
+    req
+  })
+
+  res.json({ status: 'ok' })
 })
 
 const setVirtualBinMembers = asyncHandler(async (req, res) => {
@@ -291,6 +471,64 @@ const listVehicles = asyncHandler(async (req, res) => {
   res.json({ items })
 })
 
+const getVehicleById = asyncHandler(async (req, res) => {
+  const vehicle = await Vehicle.findById(req.params.id).lean()
+  if (!vehicle) throw notFound('Vehicle not found')
+  res.json({ vehicle })
+})
+
+const updateVehicle = asyncHandler(async (req, res) => {
+  const { id } = req.params
+
+  const allowed = [
+    'code',
+    'vehicleType',
+    'capacityKg',
+    'isActive',
+    'shiftStart',
+    'shiftEnd',
+    'crewUserIds'
+  ]
+  const patch = {}
+  for (const k of allowed) {
+    if (req.body[k] !== undefined) patch[k] = req.body[k]
+  }
+
+  const vehicle = await Vehicle.findByIdAndUpdate(id, patch, {
+    new: true,
+    runValidators: true
+  }).lean()
+  if (!vehicle) throw notFound('Vehicle not found')
+
+  await audit({
+    actorUserId: req.user._id,
+    action: 'ADMIN_UPDATE_VEHICLE',
+    entityType: 'Vehicle',
+    entityId: vehicle._id,
+    meta: { patch },
+    req
+  })
+
+  res.json({ vehicle })
+})
+
+const deleteVehicle = asyncHandler(async (req, res) => {
+  const { id } = req.params
+
+  const vehicle = await Vehicle.findByIdAndDelete(id).lean()
+  if (!vehicle) throw notFound('Vehicle not found')
+
+  await audit({
+    actorUserId: req.user._id,
+    action: 'ADMIN_DELETE_VEHICLE',
+    entityType: 'Vehicle',
+    entityId: id,
+    req
+  })
+
+  res.json({ status: 'ok' })
+})
+
 // --------------------
 // Billing Plans
 // --------------------
@@ -314,11 +552,9 @@ const listBillingPlans = asyncHandler(async (req, res) => {
   res.json({ items })
 })
 
-// ✅ Admin UPDATE billing plan
 const updateBillingPlan = asyncHandler(async (req, res) => {
   const { id } = req.params
 
-  // Only allow specific fields to be updated
   const allowed = [
     'name',
     'billingMode',
@@ -352,7 +588,6 @@ const updateBillingPlan = asyncHandler(async (req, res) => {
   res.json({ plan })
 })
 
-// ✅ Admin DELETE billing plan
 const deleteBillingPlan = asyncHandler(async (req, res) => {
   const { id } = req.params
 
@@ -397,6 +632,62 @@ const listRewardRates = asyncHandler(async (req, res) => {
   res.json({ items })
 })
 
+const getRewardRateById = asyncHandler(async (req, res) => {
+  const rate = await RewardRate.findById(req.params.id).lean()
+  if (!rate) throw notFound('Reward rate not found')
+  res.json({ rate })
+})
+
+const updateRewardRate = asyncHandler(async (req, res) => {
+  const { id } = req.params
+
+  const allowed = ['category', 'ratePerUnit', 'isActive']
+  const patch = {}
+  for (const k of allowed) {
+    if (req.body[k] !== undefined) patch[k] = req.body[k]
+  }
+
+  // prevent duplicate category if changing category
+  if (patch.category) {
+    const exists = await RewardRate.findOne({ category: patch.category, _id: { $ne: id } }).lean()
+    if (exists) throw badRequest('Category already exists')
+  }
+
+  const rate = await RewardRate.findByIdAndUpdate(id, patch, {
+    new: true,
+    runValidators: true
+  }).lean()
+  if (!rate) throw notFound('Reward rate not found')
+
+  await audit({
+    actorUserId: req.user._id,
+    action: 'ADMIN_UPDATE_REWARD_RATE',
+    entityType: 'RewardRate',
+    entityId: rate._id,
+    meta: { patch },
+    req
+  })
+
+  res.json({ rate })
+})
+
+const deleteRewardRate = asyncHandler(async (req, res) => {
+  const { id } = req.params
+
+  const rate = await RewardRate.findByIdAndDelete(id).lean()
+  if (!rate) throw notFound('Reward rate not found')
+
+  await audit({
+    actorUserId: req.user._id,
+    action: 'ADMIN_DELETE_REWARD_RATE',
+    entityType: 'RewardRate',
+    entityId: id,
+    req
+  })
+
+  res.json({ status: 'ok' })
+})
+
 // --------------------
 // Membership Plans
 // --------------------
@@ -421,7 +712,10 @@ const listMembershipPlans = asyncHandler(async (req, res) => {
 })
 
 const updateMembershipPlan = asyncHandler(async (req, res) => {
-  const plan = await MembershipPlan.findByIdAndUpdate(req.params.id, req.body, { new: true }).lean()
+  const plan = await MembershipPlan.findByIdAndUpdate(req.params.id, req.body, {
+    new: true,
+    runValidators: true
+  }).lean()
   if (!plan) throw notFound('Membership plan not found')
 
   await audit({
@@ -458,37 +752,62 @@ const deactivateMembershipPlan = asyncHandler(async (req, res) => {
 // --------------------
 
 module.exports = {
+  // Users
   createUser,
   listUsers,
   updateUser,
   deleteUser,
 
+  // Zones
   createZone,
   listZones,
+  getZoneById,
   updateZone,
   deleteZone,
 
+  // Households
   createHousehold,
   listHouseholds,
+  getHouseholdById,
+  updateHousehold,
+  deleteHousehold,
 
+  // Bins
   createBin,
   listBins,
+  getBinById,
+  updateBin,
+  deleteBin,
 
+  // Virtual Bins
   createVirtualBin,
   listVirtualBins,
+  getVirtualBinById,
+  updateVirtualBin,
+  deleteVirtualBin,
   setVirtualBinMembers,
 
+  // Vehicles
   createVehicle,
   listVehicles,
+  getVehicleById,
+  updateVehicle,
+  deleteVehicle,
 
+  // Billing Plans
   createBillingPlan,
   listBillingPlans,
   updateBillingPlan,
   deleteBillingPlan,
 
+  // Reward Rates
   createRewardRate,
   listRewardRates,
+  getRewardRateById,
+  updateRewardRate,
+  deleteRewardRate,
 
+  // Membership Plans
   createMembershipPlan,
   listMembershipPlans,
   updateMembershipPlan,
