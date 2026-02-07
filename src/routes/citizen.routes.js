@@ -6,6 +6,9 @@ const { ROLES } = require('../config/constants');
 const ctrl = require('../controllers/citizen.controller');
 const multer = require('multer');
 
+// ✅ ADD: PaymentTransaction model
+const PaymentTransaction = require('../models/PaymentTransaction');
+
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const router = express.Router();
@@ -38,7 +41,39 @@ router.post(
 );
 
 router.get('/wallet', ctrl.walletSummary);
+
+/**
+ * ✅ Your existing invoices endpoint
+ * You can keep this if ctrl.listInvoices is already used elsewhere.
+ */
 router.get('/invoices', ctrl.listInvoices);
+
+/**
+ * ✅ NEW: Payment transactions for the logged-in citizen
+ * GET /api/citizen/transactions
+ */
+/**
+ * ✅ NEW: Payment transactions for the logged-in citizen
+ * GET /api/citizen/transactions
+ */
+router.get('/transactions', async (req, res, next) => {
+  try {
+    const userId = req.user?._id || req.user?.id || req.userId || req.auth?.userId;
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+    const items = await PaymentTransaction.find({ userId })
+      .sort({ createdAt: -1 })
+      .populate("userId", "name fullName firstName lastName email")
+      .populate("planId", "name monthlyFee")
+      .lean();
+
+    return res.json(items);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+
 
 // ✅ Billing plans (monthly + daily)
 router.get('/billing-plans', ctrl.listBillingPlans);
@@ -90,7 +125,6 @@ router.get('/recyclables/submissions', ctrl.listRecyclables);
 router.get('/notifications', ctrl.myNotifications);
 router.put('/notifications/:id/read', ctrl.markNotificationRead);
 
-
 // Payments
 router.post(
   '/invoices/:invoiceId/pay',
@@ -99,11 +133,6 @@ router.post(
 );
 
 // Khalti callback
-router.get('/payments/khalti/callback', ctrl.khaltiCallback);
 
-
-
-// ✅ Payments
-// router.post('/invoices/:invoiceId/pay', validate(Joi.object({ provider: Joi.string().valid('MOCK','KHALTI').optional() })), ctrl.payInvoice);
 
 module.exports = router;

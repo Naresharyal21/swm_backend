@@ -1,6 +1,7 @@
 const express = require('express');
 
 const authRoutes = require('./auth.routes');
+const authResetRoutes = require('./authReset.routes'); // ✅ ADD
 const adminRoutes = require('./admin.routes');
 const citizenRoutes = require('./citizen.routes');
 const iotRoutes = require('./iot.routes');
@@ -12,6 +13,8 @@ const esewaRoutes = require("./esewa.routes");
 const router = express.Router();
 
 router.use('/auth', authRoutes);
+router.use('/auth', authResetRoutes); // ✅ ADD (keeps endpoints as /api/auth/*)
+
 router.use('/admin', adminRoutes);
 router.use('/citizen', citizenRoutes);
 router.use('/iot', iotRoutes);

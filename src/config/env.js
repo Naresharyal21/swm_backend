@@ -65,6 +65,29 @@ const env = {
     refreshSecret: required("JWT_REFRESH_SECRET", "change_me_refresh"),
     accessExpiresIn: get("JWT_ACCESS_EXPIRES_IN", "15m"),
     refreshExpiresIn: get("JWT_REFRESH_EXPIRES_IN", "7d"),
+
+    // ✅ Password reset token (OTP flow) - keep separate from access/refresh
+    resetSecret: required("JWT_RESET_SECRET", "change_me_reset"),
+    resetTtlMin: Number(get("JWT_RESET_TTL_MIN", 10)),
+  },
+
+  // =========================
+  // OTP (Forgot Password)
+  // =========================
+  otp: {
+    ttlMin: Number(get("OTP_TTL_MIN", 10)),
+    resendCooldownSec: Number(get("OTP_RESEND_COOLDOWN_SEC", 60)),
+  },
+
+  // =========================
+  // SMTP (Email)
+  // =========================
+  smtp: {
+    host: get("SMTP_HOST", ""),
+    port: Number(get("SMTP_PORT", 587)),
+    user: get("SMTP_USER", ""),
+    pass: get("SMTP_PASS", ""),
+    from: get("MAIL_FROM", ""),
   },
 
   // =========================

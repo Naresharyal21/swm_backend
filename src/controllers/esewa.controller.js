@@ -28,14 +28,32 @@ async function esewaStatusCheck({ product_code, total_amount, transaction_uuid }
   return r.data; // { status, ref_id, ... }
 }
 
+// ✅ choose amount from plan by kind (NO days)
+function resolveAmountFromPlan(plan, kind) {
+  const k = String(kind || plan.billingMode || "MONTHLY").toUpperCase();
+
+  if (k === "MONTHLY") return { kind: "MONTHLY", amount: Number(plan.monthlyFee || 0) };
+  if (k === "DAILY") return { kind: "DAILY", amount: Number(plan.dailyPickupFee || 0) };
+
+  if (k === "BULKY") {
+    const override = plan.bulkyDailyChargeOverride;
+    const fallback = Number(env.billing?.bulkyDailyCharge || 0);
+    const amount = override == null ? fallback : Number(override || 0);
+    return { kind: "BULKY", amount };
+  }
+
+  return { kind: k, amount: NaN };
+}
+
 /**
  * POST /api/payments/esewa/initiate
- * body: { planId }
+ * body: { planId, kind }
+ * kind: MONTHLY | DAILY | BULKY
  */
 async function initiateEsewa(req, res) {
   try {
     const userId = req.user && (req.user._id || req.user.id);
-    const { planId } = req.body || {};
+    const { planId, kind } = req.body || {};
 
     if (!userId) return res.status(401).json({ message: "Unauthorized" });
     if (!planId) return res.status(400).json({ message: "planId is required" });
@@ -43,29 +61,37 @@ async function initiateEsewa(req, res) {
     const plan = await BillingPlan.findById(planId).lean();
     if (!plan || plan.isActive === false) return res.status(400).json({ message: "Invalid plan" });
 
-    const amount = Number(plan.monthlyFee);
-    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ message: "Plan monthlyFee invalid" });
+    const resolved = resolveAmountFromPlan(plan, kind);
+    const amount = Number(resolved.amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({
+        message: `Invalid amount for kind=${resolved.kind}. Check plan fees.`
+      });
+    }
 
     const txUuid = uuidv4();
 
-    // ✅ keep 1 decimal because eSewa often uses "200.0"
+    // ✅ Use 1 decimal to match eSewa "200.0"
     const total_amount = Number(amount).toFixed(1);
     const signed_field_names = "total_amount,transaction_uuid,product_code";
+    const product_code = env.esewa.productCode;
 
     const signature = signEsewaRequest({
       total_amount: String(total_amount),
       transaction_uuid: txUuid,
-      product_code: env.esewa.productCode
+      product_code
     });
 
     await PaymentTransaction.create({
       userId,
       planId,
+      kind: resolved.kind, // ✅ track what user paid for
       provider: "ESEWA",
       transactionUuid: txUuid,
       amount: Number(total_amount),
       currency: "NPR",
-      productCode: env.esewa.productCode,
+      productCode: product_code,
       status: "INITIATED"
     });
 
@@ -76,7 +102,7 @@ async function initiateEsewa(req, res) {
         tax_amount: "0",
         total_amount: String(total_amount),
         transaction_uuid: txUuid,
-        product_code: env.esewa.productCode,
+        product_code,
         product_service_charge: "0",
         product_delivery_charge: "0",
         success_url: `${env.apiPublicUrl}/api/payments/esewa/success`,
@@ -125,20 +151,17 @@ async function esewaStatus(req, res) {
 
 /**
  * GET/POST /api/payments/esewa/success
- * Accepts either:
+ * Accepts:
  *  - data=BASE64(JSON) (query or body)
- *  - plain fields (query or body)
+ *  - OR plain fields (query or body)
  */
-// console.log("ESEWA CALLBACK METHOD:", req.method, "incoming:", { ...req.query, ...req.body });
-
 async function esewaSuccess(req, res) {
   try {
-    // ✅ merge both sources (POST form lands in body, GET lands in query)
     const incoming = { ...(req.query || {}), ...(req.body || {}) };
 
     let payload = null;
 
-    // A) data=BASE64(JSON) (may come in query OR body)
+    // A) data=BASE64(JSON)
     if (incoming.data) {
       try {
         const decoded = Buffer.from(String(incoming.data), "base64").toString("utf8");
@@ -148,7 +171,7 @@ async function esewaSuccess(req, res) {
       }
     }
 
-    // B) fallback to plain fields
+    // B) fallback: plain fields
     if (!payload) payload = incoming;
 
     const transaction_uuid = payload?.transaction_uuid;
@@ -161,11 +184,10 @@ async function esewaSuccess(req, res) {
 
     if (!tx) return res.redirect(`${env.websiteUrl}/billing/failed`);
 
-    // Use DB as source of truth for amount + product code
+    // ✅ DB is source of truth (amount/product_code)
     const total_amount = Number(tx.amount).toFixed(1);
     const product_code = tx.productCode || env.esewa.productCode;
 
-    // Verify with status API; if API fails, fallback to payload.status
     let statusRaw = null;
     let refId = payload?.transaction_code || null;
 
@@ -183,13 +205,12 @@ async function esewaSuccess(req, res) {
 
     const status = String(statusRaw || "").trim().toUpperCase();
 
-    // Save tx always
     tx.status = status || tx.status || "PENDING";
     tx.providerRefId = refId;
     tx.rawPayload = payload;
     await tx.save();
 
-    // ✅ If COMPLETE, never redirect failed (even if subscription upsert fails)
+    // ✅ If COMPLETE, always redirect success
     if (status === "COMPLETE") {
       try {
         const now = new Date();

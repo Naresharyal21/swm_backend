@@ -128,6 +128,7 @@ router.post("/vehicles", validate(vehicleSchema), ctrl.createVehicle);
 router.get("/vehicles", ctrl.listVehicles);
 
 // Billing Plans (monthly + daily pickup)
+// Billing Plans (monthly + daily pickup)
 const planSchema = Joi.object({
   name: Joi.string().required(),
   billingMode: Joi.string().valid("MONTHLY", "DAILY_PICKUP").default("MONTHLY"),
@@ -136,17 +137,40 @@ const planSchema = Joi.object({
   bulkyDailyChargeOverride: Joi.number().allow(null).optional(),
   isActive: Joi.boolean().optional(),
 }).custom((value, helpers) => {
-  if (
-    value.billingMode === "DAILY_PICKUP" &&
-    Number(value.dailyPickupFee || 0) <= 0
-  ) {
+  if (value.billingMode === "DAILY_PICKUP" && Number(value.dailyPickupFee || 0) <= 0) {
     return helpers.error("any.invalid");
   }
   return value;
 }, "billingMode validation");
 
+// ✅ create
 router.post("/billing-plans", validate(planSchema), ctrl.createBillingPlan);
+
+// ✅ list
 router.get("/billing-plans", ctrl.listBillingPlans);
+
+// ✅ update (PATCH-like via PUT): make fields optional
+const planUpdateSchema = Joi.object({
+  name: Joi.string().optional(),
+  billingMode: Joi.string().valid("MONTHLY", "DAILY_PICKUP").optional(),
+  monthlyFee: Joi.number().min(0).optional(),
+  dailyPickupFee: Joi.number().min(0).optional(),
+  bulkyDailyChargeOverride: Joi.number().allow(null).optional(),
+  isActive: Joi.boolean().optional(),
+}).custom((value, helpers) => {
+  // Only validate DAILY_PICKUP rule if billingMode is DAILY_PICKUP
+  // or if user is switching to DAILY_PICKUP.
+  if (value.billingMode === "DAILY_PICKUP") {
+    const fee = Number(value.dailyPickupFee ?? 0);
+    if (fee <= 0) return helpers.error("any.invalid");
+  }
+  return value;
+}, "billingMode validation");
+
+router.put("/billing-plans/:id", validate(planUpdateSchema), ctrl.updateBillingPlan);
+
+// ✅ delete
+router.delete("/billing-plans/:id", ctrl.deleteBillingPlan);
 
 // Membership plans
 const membershipPlanSchema = Joi.object({
