@@ -559,6 +559,7 @@ const updateBillingPlan = asyncHandler(async (req, res) => {
     'name',
     'billingMode',
     'monthlyFee',
+    'annualFee',
     'dailyPickupFee',
     'bulkyDailyChargeOverride',
     'isActive'

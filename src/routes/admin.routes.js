@@ -203,16 +203,34 @@ router.delete("/vehicles/:id", ctrl.deleteVehicle);                     // ✅ a
 // Billing Plans
 // --------------------
 const planSchema = Joi.object({
-  name: Joi.string().required(),
-  billingMode: Joi.string().valid("MONTHLY", "DAILY_PICKUP").default("MONTHLY"),
+  name: Joi.string().trim().required(),
+
+  billingMode: Joi.string()
+    .valid("MONTHLY", "ANNUAL", "DAILY_PICKUP")
+    .default("MONTHLY"),
+
+  // MONTHLY
   monthlyFee: Joi.number().min(0).default(0),
+
+  // ✅ ANNUAL
+  annualFee: Joi.number().min(0).default(0),
+
+  // DAILY_PICKUP
   dailyPickupFee: Joi.number().min(0).default(0),
+
   bulkyDailyChargeOverride: Joi.number().allow(null).optional(),
   isActive: Joi.boolean().optional(),
 }).custom((value, helpers) => {
-  if (value.billingMode === "DAILY_PICKUP" && Number(value.dailyPickupFee || 0) <= 0) {
+  const mode = value.billingMode;
+
+  if (mode === "DAILY_PICKUP" && Number(value.dailyPickupFee || 0) <= 0) {
     return helpers.error("any.invalid");
   }
+
+  if (mode === "ANNUAL" && Number(value.annualFee || 0) <= 0) {
+    return helpers.error("any.invalid");
+  }
+
   return value;
 }, "billingMode validation");
 
@@ -220,19 +238,40 @@ router.post("/billing-plans", validate(planSchema), ctrl.createBillingPlan);
 router.get("/billing-plans", ctrl.listBillingPlans);
 
 const planUpdateSchema = Joi.object({
-  name: Joi.string().optional(),
-  billingMode: Joi.string().valid("MONTHLY", "DAILY_PICKUP").optional(),
+  name: Joi.string().trim().optional(),
+
+  billingMode: Joi.string()
+    .valid("MONTHLY", "ANNUAL", "DAILY_PICKUP")
+    .optional(),
+
   monthlyFee: Joi.number().min(0).optional(),
+
+  // ✅ ANNUAL
+  annualFee: Joi.number().min(0).optional(),
+
   dailyPickupFee: Joi.number().min(0).optional(),
+
   bulkyDailyChargeOverride: Joi.number().allow(null).optional(),
   isActive: Joi.boolean().optional(),
-}).custom((value, helpers) => {
-  if (value.billingMode === "DAILY_PICKUP") {
-    const fee = Number(value.dailyPickupFee ?? 0);
-    if (fee <= 0) return helpers.error("any.invalid");
-  }
-  return value;
-}, "billingMode validation").min(1);
+})
+  .custom((value, helpers) => {
+    // NOTE: If billingMode is not provided on update,
+    // we cannot safely enforce mode-specific fees here without reading DB.
+    // So we only validate strictly when billingMode is explicitly provided.
+
+    if (value.billingMode === "DAILY_PICKUP") {
+      const fee = Number(value.dailyPickupFee ?? 0);
+      if (fee <= 0) return helpers.error("any.invalid");
+    }
+
+    if (value.billingMode === "ANNUAL") {
+      const fee = Number(value.annualFee ?? 0);
+      if (fee <= 0) return helpers.error("any.invalid");
+    }
+
+    return value;
+  }, "billingMode validation")
+  .min(1);
 
 router.put("/billing-plans/:id", validate(planUpdateSchema), ctrl.updateBillingPlan);
 router.delete("/billing-plans/:id", ctrl.deleteBillingPlan);

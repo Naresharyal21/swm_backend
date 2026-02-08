@@ -9,11 +9,13 @@ const opsRoutes = require('./ops.routes');
 const crewRoutes = require('./crew.routes');
 const filesRoutes = require('./files.routes');
 const esewaRoutes = require("./esewa.routes");
+const signupOtpRoutes = require('./signupotp.routes'); 
 
 const router = express.Router();
 
 router.use('/auth', authRoutes);
 router.use('/auth', authResetRoutes); // ✅ ADD (keeps endpoints as /api/auth/*)
+router.use('/auth', signupOtpRoutes);
 
 router.use('/admin', adminRoutes);
 router.use('/citizen', citizenRoutes);
