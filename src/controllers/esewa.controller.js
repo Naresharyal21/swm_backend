@@ -1,13 +1,17 @@
-// src/controllers/esewa.controller.js
 const axios = require("axios");
 const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid");
+const mongoose = require("mongoose");
 
 const env = require("../config/env");
 
 const BillingPlan = require("../models/BillingPlan");
 const PaymentTransaction = require("../models/PaymentTransaction");
 const Subscription = require("../models/Subscription");
+
+// Option A: activate specific household/bin
+const Household = require("../models/Household");
+const Bin = require("../models/Bin");
 
 // -------------------------
 // date helpers (UTC-safe)
@@ -36,6 +40,9 @@ function toInt(v) {
   const n = Number(v);
   return Number.isInteger(n) ? n : null;
 }
+function isObjId(v) {
+  return mongoose.Types.ObjectId.isValid(String(v || ""));
+}
 
 // v2 request signature: order must match signed_field_names exactly
 function signEsewaRequest({ total_amount, transaction_uuid, product_code }) {
@@ -57,7 +64,6 @@ function normalizeKind(kind, fallbackMode) {
   return "MONTHLY";
 }
 
-// ✅ choose amount from plan by kind
 function resolveAmountFromPlan(plan, kind) {
   const k = normalizeKind(kind, plan.billingMode);
 
@@ -76,16 +82,14 @@ function resolveAmountFromPlan(plan, kind) {
 }
 
 // -------------------------
-// ✅ BLOCKING RULE:
-// ONLY block when status === "COMPLETE"
-// INITIATED should NEVER block.
+// Blocking: ONLY COMPLETE blocks
 // -------------------------
-
-async function hasExactMonthlyPaid({ userId, year, month }) {
+async function hasExactMonthlyPaid({ userId, householdId, year, month }) {
   const hit = await PaymentTransaction.findOne({
     userId,
+    householdId,
     provider: "ESEWA",
-    status: "COMPLETE", // ✅ ONLY COMPLETE blocks
+    status: "COMPLETE",
     kind: "MONTHLY",
     targetYear: year,
     targetMonth: month,
@@ -95,11 +99,12 @@ async function hasExactMonthlyPaid({ userId, year, month }) {
   return !!hit;
 }
 
-async function hasExactAnnualPaid({ userId, year }) {
+async function hasExactAnnualPaid({ userId, householdId, year }) {
   const hit = await PaymentTransaction.findOne({
     userId,
+    householdId,
     provider: "ESEWA",
-    status: "COMPLETE", // ✅ ONLY COMPLETE blocks
+    status: "COMPLETE",
     kind: "ANNUAL",
     targetYear: year,
   })
@@ -108,23 +113,61 @@ async function hasExactAnnualPaid({ userId, year }) {
   return !!hit;
 }
 
-// overlap: existing covers any part of [coverFrom, coverTo)
-async function hasCoverageOverlap({ userId, coverFrom, coverTo }) {
+async function hasCoverageOverlap({ userId, householdId, coverFrom, coverTo }) {
   if (!coverFrom || !coverTo) return false;
 
   const hit = await PaymentTransaction.findOne({
     userId,
+    householdId,
     provider: "ESEWA",
-    status: "COMPLETE", // ✅ ONLY COMPLETE blocks
+    status: "COMPLETE",
     kind: { $in: ["MONTHLY", "ANNUAL"] },
     coverFrom: { $ne: null },
     coverTo: { $ne: null },
     $and: [{ coverFrom: { $lt: coverTo } }, { coverTo: { $gt: coverFrom } }],
   })
-    .select("_id kind coverFrom coverTo")
+    .select("_id")
     .lean();
 
   return !!hit;
+}
+
+async function assertMyHousehold({ userId, householdId }) {
+  if (!isObjId(householdId)) {
+    const err = new Error("Valid householdId is required");
+    err.status = 400;
+    throw err;
+  }
+
+  const h = await Household.findOne({ _id: householdId, citizenUserId: userId })
+    .select("_id citizenUserId")
+    .lean();
+
+  if (!h) {
+    const err = new Error("Household not found for this user");
+    err.status = 404;
+    throw err;
+  }
+
+  return h;
+}
+
+async function activateOneBinForHousehold({ householdId, binMongoId }) {
+  if (binMongoId && isObjId(binMongoId)) {
+    const b = await Bin.findOne({ _id: binMongoId, householdId });
+    if (b) {
+      b.status = "ACTIVE";
+      await b.save();
+      return b;
+    }
+  }
+
+  const first = await Bin.findOne({ householdId }).sort({ createdAt: 1 });
+  if (!first) return null;
+
+  first.status = "ACTIVE";
+  await first.save();
+  return first;
 }
 
 /**
@@ -133,6 +176,8 @@ async function hasCoverageOverlap({ userId, coverFrom, coverTo }) {
  *  {
  *    planId,
  *    kind: MONTHLY | ANNUAL | DAILY | BULKY,
+ *    householdId,            REQUIRED for MONTHLY/ANNUAL
+ *    binMongoId?,            optional
  *    targetYear? (or year),
  *    targetMonth? (or month)  // MONTHLY only
  *  }
@@ -142,6 +187,9 @@ async function initiateEsewa(req, res) {
     const userId = req.user && (req.user._id || req.user.id);
     const { planId } = req.body || {};
     const kindInput = req.body?.kind;
+
+    const householdId = req.body?.householdId || null;
+    const binMongoId = req.body?.binMongoId || null;
 
     const now = new Date();
     const targetYearRaw = req.body?.targetYear ?? req.body?.year ?? now.getFullYear();
@@ -155,7 +203,10 @@ async function initiateEsewa(req, res) {
 
     const kind = normalizeKind(kindInput, plan.billingMode);
 
-    // ✅ compute target + cover range for MONTHLY/ANNUAL
+    if (kind === "MONTHLY" || kind === "ANNUAL") {
+      await assertMyHousehold({ userId, householdId });
+    }
+
     let targetYear = null;
     let targetMonth = null;
     let coverFrom = null;
@@ -173,14 +224,11 @@ async function initiateEsewa(req, res) {
       coverFrom = monthStartUTC(y, m);
       coverTo = monthEndExclusiveUTC(y, m);
 
-      // ✅ block exact duplicate month (ONLY COMPLETE blocks)
-      if (await hasExactMonthlyPaid({ userId, year: y, month: m })) {
-        return res.status(400).json({ message: "Already paid for this month" });
+      if (await hasExactMonthlyPaid({ userId, householdId, year: y, month: m })) {
+        return res.status(400).json({ message: "Already paid for this month (this household)" });
       }
-
-      // ✅ block if annual already covers (ONLY COMPLETE blocks)
-      if (await hasCoverageOverlap({ userId, coverFrom, coverTo })) {
-        return res.status(400).json({ message: "Already paid (covered) for this month" });
+      if (await hasCoverageOverlap({ userId, householdId, coverFrom, coverTo })) {
+        return res.status(400).json({ message: "Already paid (covered) for this month (this household)" });
       }
     }
 
@@ -192,32 +240,24 @@ async function initiateEsewa(req, res) {
       coverFrom = yearStartUTC(y);
       coverTo = yearEndExclusiveUTC(y);
 
-      // ✅ block exact duplicate year (ONLY COMPLETE blocks)
-      if (await hasExactAnnualPaid({ userId, year: y })) {
-        return res.status(400).json({ message: "Already paid for this year" });
+      if (await hasExactAnnualPaid({ userId, householdId, year: y })) {
+        return res.status(400).json({ message: "Already paid for this year (this household)" });
       }
-
-      // ✅ block if overlaps any existing monthly/annual (ONLY COMPLETE blocks)
-      if (await hasCoverageOverlap({ userId, coverFrom, coverTo })) {
-        return res.status(400).json({ message: "Already paid (covered) for this year" });
+      if (await hasCoverageOverlap({ userId, householdId, coverFrom, coverTo })) {
+        return res.status(400).json({ message: "Already paid (covered) for this year (this household)" });
       }
     }
-
-    // DAILY/BULKY: no blocking
 
     const resolved = resolveAmountFromPlan(plan, kind);
     const amount = Number(resolved.amount);
 
     if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(400).json({
-        message: `Invalid amount for kind=${resolved.kind}. Check plan fees.`,
-      });
+      return res.status(400).json({ message: `Invalid amount for kind=${resolved.kind}. Check plan fees.` });
     }
 
     const txUuid = uuidv4();
-
-    // ✅ Use 1 decimal to match eSewa "200.0"
     const total_amount = Number(amount).toFixed(1);
+
     const signed_field_names = "total_amount,transaction_uuid,product_code";
     const product_code = env.esewa.productCode;
 
@@ -234,7 +274,9 @@ async function initiateEsewa(req, res) {
       provider: "ESEWA",
       transactionUuid: txUuid,
 
-      // ✅ store targeting + coverage (critical for your calendar)
+      householdId: (kind === "MONTHLY" || kind === "ANNUAL") ? householdId : (householdId || null),
+      binMongoId: binMongoId && isObjId(binMongoId) ? binMongoId : null,
+
       targetYear,
       targetMonth,
       coverFrom,
@@ -243,8 +285,6 @@ async function initiateEsewa(req, res) {
       amount: Number(total_amount),
       currency: "NPR",
       productCode: product_code,
-
-      // ✅ INITIATED is allowed and MUST NOT block (guards use only COMPLETE)
       status: "INITIATED",
     });
 
@@ -265,13 +305,10 @@ async function initiateEsewa(req, res) {
       },
     });
   } catch (e) {
-    return res.status(500).json({ message: e?.message || "Failed to initiate eSewa" });
+    return res.status(e?.status || 500).json({ message: e?.message || "Failed to initiate eSewa" });
   }
 }
 
-/**
- * GET /api/payments/esewa/status/:txUuid   (auth)
- */
 async function esewaStatus(req, res) {
   try {
     const userId = req.user && (req.user._id || req.user.id);
@@ -302,25 +339,11 @@ async function esewaStatus(req, res) {
   }
 }
 
-/**
- * GET/POST /api/payments/esewa/success
- *
- * IMPORTANT:
- * - You said your system uses only INITIATED and COMPLETE.
- * - So we update to COMPLETE only when eSewa status is COMPLETE.
- * - Otherwise we keep INITIATED (do not set PENDING etc.).
- *
- * Also:
- * - If old INITIATED records exist with null targetYear/targetMonth/coverFrom/coverTo,
- *   we backfill them on COMPLETE (so calendar works).
- */
 async function esewaSuccess(req, res) {
   try {
     const incoming = { ...(req.query || {}), ...(req.body || {}) };
 
     let payload = null;
-
-    // A) data=BASE64(JSON)
     if (incoming.data) {
       try {
         const decoded = Buffer.from(String(incoming.data), "base64").toString("utf8");
@@ -329,8 +352,6 @@ async function esewaSuccess(req, res) {
         payload = null;
       }
     }
-
-    // B) fallback: plain fields
     if (!payload) payload = incoming;
 
     const transaction_uuid = payload?.transaction_uuid;
@@ -343,7 +364,6 @@ async function esewaSuccess(req, res) {
 
     if (!tx) return res.redirect(`${env.websiteUrl}/billing/failed`);
 
-    // ✅ DB is source of truth (amount/product_code)
     const total_amount = Number(tx.amount).toFixed(1);
     const product_code = tx.productCode || env.esewa.productCode;
 
@@ -365,23 +385,19 @@ async function esewaSuccess(req, res) {
     const status = String(statusRaw || "").trim().toUpperCase();
     const isComplete = status === "COMPLETE";
 
-    // ✅ only INITIATED / COMPLETE
     tx.status = isComplete ? "COMPLETE" : "INITIATED";
     tx.providerRefId = refId;
     tx.rawPayload = payload;
 
-    // ✅ Backfill targeting/coverage on COMPLETE if missing (fixes your old null targetYear/targetMonth)
+    // Backfill coverage for calendar rules
     if (isComplete) {
       const k = String(tx.kind || "MONTHLY").toUpperCase();
       const base = isValidDate(tx.createdAt) ? tx.createdAt : new Date();
 
-      // If missing annual/monthly coverage, infer from createdAt (fallback)
       if (k === "MONTHLY") {
         if (!Number.isInteger(tx.targetYear) || !Number.isInteger(tx.targetMonth)) {
-          const y = base.getUTCFullYear();
-          const m = base.getUTCMonth() + 1;
-          tx.targetYear = y;
-          tx.targetMonth = m;
+          tx.targetYear = base.getUTCFullYear();
+          tx.targetMonth = base.getUTCMonth() + 1;
         }
         if (!isValidDate(tx.coverFrom) || !isValidDate(tx.coverTo)) {
           tx.coverFrom = monthStartUTC(tx.targetYear, tx.targetMonth);
@@ -390,9 +406,7 @@ async function esewaSuccess(req, res) {
       }
 
       if (k === "ANNUAL") {
-        if (!Number.isInteger(tx.targetYear)) {
-          tx.targetYear = base.getUTCFullYear();
-        }
+        if (!Number.isInteger(tx.targetYear)) tx.targetYear = base.getUTCFullYear();
         if (!isValidDate(tx.coverFrom) || !isValidDate(tx.coverTo)) {
           tx.coverFrom = yearStartUTC(tx.targetYear);
           tx.coverTo = yearEndExclusiveUTC(tx.targetYear);
@@ -402,54 +416,56 @@ async function esewaSuccess(req, res) {
 
     await tx.save();
 
-    // ✅ If COMPLETE, update subscription based on kind
-    if (isComplete) {
-      try {
-        const k = String(tx.kind || "MONTHLY").toUpperCase();
-        const now = new Date();
+    if (!isComplete) return res.redirect(`${env.websiteUrl}/billing/pending`);
 
-        // prefer coverFrom/coverTo if available
+    // COMPLETE: activate bin + household planId + subscription
+    try {
+      const k = String(tx.kind || "MONTHLY").toUpperCase();
+
+      if ((k === "MONTHLY" || k === "ANNUAL") && tx.householdId) {
+        const activatedBin = await activateOneBinForHousehold({
+          householdId: tx.householdId,
+          binMongoId: tx.binMongoId,
+        });
+
+        await Household.updateOne(
+          { _id: tx.householdId, citizenUserId: tx.userId },
+          { $set: { planId: tx.planId } }
+        );
+
+        const now = new Date();
         const validFrom = isValidDate(tx.coverFrom) ? tx.coverFrom : now;
 
         let validUntil = null;
         if (isValidDate(tx.coverTo)) validUntil = tx.coverTo;
-        else if (k === "ANNUAL") validUntil = addMonths(validFrom, 12);
-        else if (k === "MONTHLY") validUntil = addMonths(validFrom, 1);
-        else validUntil = addMonths(now, 1);
+        else validUntil = k === "ANNUAL" ? addMonths(validFrom, 12) : addMonths(validFrom, 1);
 
-        // ✅ Only MONTHLY/ANNUAL should activate subscription.
-        if (k === "MONTHLY" || k === "ANNUAL") {
-          await Subscription.findOneAndUpdate(
-            { userId: tx.userId },
-            {
-              userId: tx.userId,
-              planId: tx.planId,
-              status: "ACTIVE",
-              validFrom,
-              validUntil,
-              lastPaymentTxId: tx._id,
-            },
-            { upsert: true, new: true, setDefaultsOnInsert: true }
-          );
-        }
-      } catch (err) {
-        console.error("Subscription upsert failed:", err?.message || err);
+        await Subscription.findOneAndUpdate(
+          { userId: tx.userId }, // upgrade later to { userId, householdId } if you add householdId to Subscription schema
+          {
+            userId: tx.userId,
+            planId: tx.planId,
+            status: "ACTIVE",
+            validFrom,
+            validUntil,
+            lastPaymentTxId: tx._id,
+            householdId: tx.householdId,
+            binMongoId: activatedBin?._id || tx.binMongoId || null,
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
       }
-
-      return res.redirect(`${env.websiteUrl}/billing/success`);
+    } catch (err) {
+      console.error("Activate bin / subscription update failed:", err?.message || err);
     }
 
-    // Not COMPLETE => still INITIATED
-    return res.redirect(`${env.websiteUrl}/billing/pending`);
+    return res.redirect(`${env.websiteUrl}/billing/success`);
   } catch (e) {
     console.error("ESEWA SUCCESS ERROR:", e?.message || e);
     return res.redirect(`${env.websiteUrl}/billing/failed`);
   }
 }
 
-/**
- * GET/POST /api/payments/esewa/failure
- */
 async function esewaFailure(req, res) {
   return res.redirect(`${env.websiteUrl}/billing/failed`);
 }

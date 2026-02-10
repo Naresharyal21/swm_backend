@@ -1,112 +1,201 @@
-const express = require('express');
-const Joi = require('joi');
-const { authenticate, requireRole } = require('../middlewares/auth');
-const { validate } = require('../middlewares/validate');
-const { ROLES } = require('../config/constants');
-const ctrl = require('../controllers/citizen.controller');
-const multer = require('multer');
+// src/routes/citizen.routes.js
+const express = require("express");
+const Joi = require("joi");
+const multer = require("multer");
 
-// ✅ ADD: PaymentTransaction model
-const PaymentTransaction = require('../models/PaymentTransaction');
+const { authenticate, requireRole } = require("../middlewares/auth");
+const { validate } = require("../middlewares/validate");
+const { ROLES } = require("../config/constants");
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const ctrl = require("../controllers/citizen.controller");
+
+// ✅ PaymentTransaction model (for /citizen/transactions)
+const PaymentTransaction = require("../models/PaymentTransaction");
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
 
 const router = express.Router();
+
+// ✅ Apply auth + role for all citizen routes
 router.use(authenticate);
 router.use(requireRole(ROLES.CITIZEN));
 
 const locationSchema = Joi.object({
-  type: Joi.string().valid('Point').default('Point'),
-  coordinates: Joi.array().items(Joi.number()).length(2).required()
+  type: Joi.string().valid("Point").default("Point"),
+  coordinates: Joi.array().items(Joi.number()).length(2).required(),
 });
 
+/* ------------------------------------------------------------------ */
+/* NEW: Citizen selectable zones + virtual bins                        */
+/* ------------------------------------------------------------------ */
+
+// Zones created by admin (dropdown)
+router.get("/zones", ctrl.listZones);
+
+// Virtual bins created by admin (dropdown) - filter with ?zoneId=...
+router.get(
+  "/virtual-bins",
+  validate(
+    Joi.object({
+      zoneId: Joi.string().optional(),
+    })
+  ),
+  ctrl.listVirtualBins
+);
+
+/* ------------------------------------------------------------------ */
+/* NEW: One-step create Household + Bin (INACTIVE)                      */
+/* ------------------------------------------------------------------ */
+
 router.post(
-  '/litter-reports',
-  validate(Joi.object({ location: locationSchema.required(), description: Joi.string().allow('').optional() })),
+  "/household-bins",
+  validate(
+    Joi.object({
+      zoneId: Joi.string().required(),
+      virtualBinId: Joi.string().required(),
+      address: Joi.string().min(2).required(),
+      binId: Joi.string().min(1).required(),
+      location: locationSchema.required(),
+    })
+  ),
+  ctrl.createHouseholdWithBin
+);
+
+/* ------------------------------------------------------------------ */
+/* Existing endpoints                                                   */
+/* ------------------------------------------------------------------ */
+
+router.post(
+  "/litter-reports",
+  validate(
+    Joi.object({
+      location: locationSchema.required(),
+      description: Joi.string().allow("").optional(),
+    })
+  ),
   ctrl.createLitterReport
 );
 
 router.post(
-  '/bulky-requests',
-  validate(Joi.object({ householdId: Joi.string().required(), bulkyWeightKg: Joi.number().required(), description: Joi.string().allow('').optional() })),
+  "/bulky-requests",
+  validate(
+    Joi.object({
+      householdId: Joi.string().required(),
+      bulkyWeightKg: Joi.number().required(),
+      description: Joi.string().allow("").optional(),
+    })
+  ),
   ctrl.createBulkyRequest
 );
 
-router.get('/cases', ctrl.listCases);
+router.get("/cases", ctrl.listCases);
 
 router.post(
-  '/reward-claims',
+  "/reward-claims",
   validate(Joi.object({ category: Joi.string().required(), quantity: Joi.number().min(1).required() })),
   ctrl.createRewardClaim
 );
 
-router.get('/wallet', ctrl.walletSummary);
+router.get("/wallet", ctrl.walletSummary);
 
-/**
- * ✅ Your existing invoices endpoint
- * You can keep this if ctrl.listInvoices is already used elsewhere.
- */
-router.get('/invoices', ctrl.listInvoices);
+// Existing invoices endpoint
+router.get("/invoices", ctrl.listInvoices);
 
+/* ------------------------------------------------------------------ */
+/* ✅ FIXED: Transactions endpoint (SAFE, NO populate, no crash)         */
+/* ------------------------------------------------------------------ */
 /**
- * ✅ NEW: Payment transactions for the logged-in citizen
  * GET /api/citizen/transactions
+ * Returns: { items: [...] }
  */
-/**
- * ✅ NEW: Payment transactions for the logged-in citizen
- * GET /api/citizen/transactions
- */
-router.get('/transactions', async (req, res, next) => {
+router.get("/transactions", async (req, res, next) => {
   try {
-    const userId = req.user?._id || req.user?.id || req.userId || req.auth?.userId;
-    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+    const userId = req.user?._id || req.user?.id;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
     const items = await PaymentTransaction.find({ userId })
       .sort({ createdAt: -1 })
-      .populate("userId", "name fullName firstName lastName email")
-      .populate("planId", "name monthlyFee")
+      .limit(500)
       .lean();
 
-    return res.json(items);
+    return res.json({ items });
   } catch (err) {
     return next(err);
   }
 });
 
+// Billing plans (monthly + daily)
+router.get("/billing-plans", ctrl.listBillingPlans);
 
+// list the household per citizen (for dropdown)
+router.get("/household/me", ctrl.getMyHousehold);
 
-// ✅ Billing plans (monthly + daily)
-router.get('/billing-plans', ctrl.listBillingPlans);
+// Citizen households (for dropdown)
+router.get("/households/me", ctrl.getMyHouseholds);
 
-// list the house hold per citizen(for drop dowm)
-router.get('/household/me', ctrl.getMyHousehold);
-
-// Citizen households (for dropdown) Note above router do same work but filter all details: router.get('/household/me', ctrl.getMyHousehold);
-router.get('/households/me', ctrl.getMyHouseholds);
-
-// ✅ Household settings
+// Household settings
 router.put(
-  '/households/:householdId/plan',
+  "/households/:householdId/plan",
   validate(Joi.object({ planId: Joi.string().allow(null).optional() })),
   ctrl.updateMyHouseholdPlan
 );
 
 router.put(
-  '/households/:householdId/pickup-schedule',
-  validate(Joi.object({ pickupScheduleDays: Joi.array().items(Joi.string().valid('SUN','MON','TUE','WED','THU','FRI','SAT')).min(1).required() })),
+  "/households/:householdId/pickup-schedule",
+  validate(
+    Joi.object({
+      pickupScheduleDays: Joi.array()
+        .items(Joi.string().valid("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"))
+        .min(1)
+        .required(),
+    })
+  ),
   ctrl.updateMyPickupSchedule
 );
 
-// ✅ Membership
-router.get('/memberships/plans', ctrl.listMemberships);
-router.get('/memberships/me', ctrl.getMyMembership);
-router.post('/memberships/subscribe', validate(Joi.object({ planId: Joi.string().required() })), ctrl.subscribeMembership);
-router.post('/memberships/cancel', validate(Joi.object({ note: Joi.string().allow('').optional() })), ctrl.cancelMyMembership);
+/* ------------------------------------------------------------------ */
+/* NEW: Cascade delete Household (+ bins if cascade=1)                  */
+/* ------------------------------------------------------------------ */
 
-// ✅ Recyclable submission (non-disposal waste)
+router.delete(
+  "/households/:id",
+  validate(
+    Joi.object({
+      cascade: Joi.string().valid("1").optional(),
+    })
+  ),
+  ctrl.deleteHousehold
+);
+
+/* ------------------------------------------------------------------ */
+/* Membership                                                          */
+/* ------------------------------------------------------------------ */
+
+router.get("/memberships/plans", ctrl.listMemberships);
+router.get("/memberships/me", ctrl.getMyMembership);
+
 router.post(
-  '/recyclables/submissions',
-  upload.array('files', 5),
+  "/memberships/subscribe",
+  validate(Joi.object({ planId: Joi.string().required() })),
+  ctrl.subscribeMembership
+);
+
+router.post(
+  "/memberships/cancel",
+  validate(Joi.object({ note: Joi.string().allow("").optional() })),
+  ctrl.cancelMyMembership
+);
+
+/* ------------------------------------------------------------------ */
+/* Recyclable submission (non-disposal waste)                           */
+/* ------------------------------------------------------------------ */
+
+router.post(
+  "/recyclables/submissions",
+  upload.array("files", 5),
   validate(
     Joi.object({
       householdId: Joi.string().required(),
@@ -114,25 +203,66 @@ router.post(
       pieces: Joi.number().min(0).optional(),
       avgWeightKg: Joi.number().min(0).optional(),
       estimatedTotalWeightKg: Joi.number().min(0).optional(),
-      scheduledDate: Joi.string().allow(null).optional()
+      scheduledDate: Joi.string().allow(null).optional(),
     })
   ),
   ctrl.createRecyclableSubmission
 );
-router.get('/recyclables/submissions', ctrl.listRecyclables);
 
-// ✅ Notifications
-router.get('/notifications', ctrl.myNotifications);
-router.put('/notifications/:id/read', ctrl.markNotificationRead);
+router.get("/recyclables/submissions", ctrl.listRecyclables);
 
-// Payments
+/* ------------------------------------------------------------------ */
+/* Notifications                                                        */
+/* ------------------------------------------------------------------ */
+
+router.get("/notifications", ctrl.myNotifications);
+router.put("/notifications/:id/read", ctrl.markNotificationRead);
+
+/* ------------------------------------------------------------------ */
+/* Payments                                                             */
+/* ------------------------------------------------------------------ */
+
 router.post(
-  '/invoices/:invoiceId/pay',
-  validate(Joi.object({ provider: Joi.string().valid('MOCK', 'KHALTI').optional() })),
+  "/invoices/:invoiceId/pay",
+  validate(Joi.object({ provider: Joi.string().valid("MOCK", "KHALTI").optional() })),
   ctrl.payInvoice
 );
 
-// Khalti callback
+/* ------------------------------------------------------------------ */
+/* ✅ Activate bin after payment (Option A)                              */
+/* ------------------------------------------------------------------ */
+
+router.post(
+  "/activate-bin",
+  validate(Joi.object({ householdId: Joi.string().required(), planId: Joi.string().required() })),
+  ctrl.activateBinAfterPayment
+);
+//deactivate bins
+
+router.post(
+  "/deactivate-bin",
+  validate(Joi.object({ householdId: Joi.string().required() })),
+  ctrl.deactivateBin
+);
+
+
+/* ------------------------------------------------------------------ */
+/* NEW: Available Bin IDs for citizen (unassigned only)                 */
+/* ------------------------------------------------------------------ */
+
+router.get(
+  "/binids/available",
+  validate(
+    Joi.object({
+      q: Joi.string().allow("").optional(),
+      limit: Joi.number().min(1).max(200).optional(),
+      page: Joi.number().min(1).optional(),
+    })
+  ),
+  ctrl.listAvailableBinIds
+);
+
+
 
 
 module.exports = router;

@@ -13,7 +13,7 @@ const BinSchema = new mongoose.Schema(
       type: { type: String, enum: ['Point'], default: 'Point' },
       coordinates: { type: [Number], required: true }
     },
-    status: { type: String, default: 'ACTIVE' }
+    status: { type: String, default: 'INACTIVE' }
   },
   { timestamps: true }
 );

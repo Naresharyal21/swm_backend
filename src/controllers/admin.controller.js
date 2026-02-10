@@ -607,6 +607,65 @@ const deleteBillingPlan = asyncHandler(async (req, res) => {
   res.json({ status: 'ok' })
 })
 
+//viwe active payments
+const PaymentTransaction = require("../models/PaymentTransaction");
+
+function toInt(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+//admin see payment.
+const listPaymentTransactions = asyncHandler(async (req, res) => {
+  const status = req.query.status ? String(req.query.status).trim().toUpperCase() : null;
+  const kind = req.query.kind ? String(req.query.kind).trim().toUpperCase() : null;
+
+  const limit = Math.min(toInt(req.query.limit) || 200, 1000);
+  const skip = Math.max(toInt(req.query.skip) || 0, 0);
+
+  const q = {};
+  if (status) q.status = status;
+  if (kind) q.kind = kind;
+
+  // date range
+  const from = req.query.from ? new Date(String(req.query.from)) : null;
+  const to = req.query.to ? new Date(String(req.query.to)) : null;
+
+  if (from && !Number.isNaN(from.getTime())) {
+    q.createdAt = q.createdAt || {};
+    q.createdAt.$gte = from;
+  }
+  if (to && !Number.isNaN(to.getTime())) {
+    const end = new Date(to);
+    end.setHours(23, 59, 59, 999);
+    q.createdAt = q.createdAt || {};
+    q.createdAt.$lte = end;
+  }
+
+  // search
+  const search = req.query.search ? String(req.query.search).trim() : "";
+  if (search) {
+    const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    q.$or = [
+      { transactionUuid: rx },
+      { providerRefId: rx },
+      { provider: rx },
+      { currency: rx },
+    ];
+  }
+
+  const items = await PaymentTransaction.find(q)
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .skip(skip)
+    .populate("userId", "name fullName firstName lastName email")
+    .populate("planId", "name monthlyFee annualFee")
+    .lean();
+
+  res.json({ items, limit, skip });
+});
+
+
 // --------------------
 // Reward Rates
 // --------------------
@@ -801,6 +860,11 @@ module.exports = {
   updateBillingPlan,
   deleteBillingPlan,
 
+  //admin see payed
+    // Payment Transactions
+  listPaymentTransactions,
+
+
   // Reward Rates
   createRewardRate,
   listRewardRates,
@@ -813,4 +877,5 @@ module.exports = {
   listMembershipPlans,
   updateMembershipPlan,
   deactivateMembershipPlan
+
 }

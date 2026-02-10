@@ -9,16 +9,35 @@ const PaymentTransactionSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+
+    // ✅ OPTION A: tie the payment to ONE household (one bin activation)
+    householdId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Household",
+      default: null,
+      index: true,
+    },
+
+    // ✅ OPTIONAL: if you want direct link to Bin document (mongo _id)
+    // (not the binId string like BIN-001)
+    binMongoId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Bin",
+      default: null,
+      index: true,
+    },
+
     planId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "BillingPlan",
       required: true,
+      index: true,
     },
 
     provider: { type: String, enum: ["ESEWA", "MOCK"], required: true },
     transactionUuid: { type: String, required: true, unique: true, index: true },
 
-    // ✅ NEW: what type of payment this is
+    // ✅ what type of payment this is
     kind: {
       type: String,
       enum: ["MONTHLY", "ANNUAL", "DAILY", "BULKY"],
@@ -26,13 +45,19 @@ const PaymentTransactionSchema = new mongoose.Schema(
       index: true,
     },
 
-    // ✅ NEW: Coverage window (ONLY for MONTHLY/ANNUAL; null for DAILY/BULKY)
-    // Used to block paying same month twice and block Monthly when Annual covers that month
+    /**
+     * ✅ Coverage window (MONTHLY/ANNUAL only)
+     * Use this for:
+     * - calendar (covers months)
+     * - overlap checks
+     */
     coverFrom: { type: Date, default: null, index: true },
     coverTo: { type: Date, default: null, index: true },
 
-    // ✅ NEW: Explicit month/year targeting for monthly payments (Optional but useful for UI/calendar)
-    // month: 1-12
+    /**
+     * ✅ Explicit month/year (MONTHLY UI)
+     * month: 1-12
+     */
     targetYear: { type: Number, default: null, index: true },
     targetMonth: { type: Number, default: null, index: true },
 
@@ -40,6 +65,7 @@ const PaymentTransactionSchema = new mongoose.Schema(
     currency: { type: String, default: "NPR" },
 
     productCode: { type: String },
+
     status: {
       type: String,
       enum: ["INITIATED", "COMPLETE", "PENDING", "FAILED", "CANCELED", "NOT_FOUND", "AMBIGUOUS"],
@@ -54,20 +80,62 @@ const PaymentTransactionSchema = new mongoose.Schema(
 );
 
 /**
- * Indexes to support:
- * - coverage overlap checks for MONTHLY/ANNUAL
- * - fast "paid months in a year" queries
+ * ✅ OPTION A: Uniqueness rules (per household)
+ *
+ * MONTHLY:
+ *   one tx per (userId, householdId, kind=MONTHLY, targetYear, targetMonth)
+ *
+ * ANNUAL:
+ *   one tx per (userId, householdId, kind=ANNUAL, targetYear)
+ *
+ * NOTE:
+ * - These indexes require householdId for MONTHLY/ANNUAL.
+ * - DAILY/BULKY are not restricted by these unique indexes.
  */
 
-// For overlap checks: find "paid/complete" tx that overlaps new coverFrom/coverTo
+// ✅ MONTHLY unique per household per month
 PaymentTransactionSchema.index(
-  { userId: 1, provider: 1, status: 1, coverFrom: 1, coverTo: 1, kind: 1 },
+  { userId: 1, householdId: 1, kind: 1, targetYear: 1, targetMonth: 1 },
+  {
+    unique: true,
+    name: "uniq_monthly_per_household",
+    partialFilterExpression: {
+      kind: "MONTHLY",
+      householdId: { $type: "objectId" },
+      targetYear: { $type: "number" },
+      targetMonth: { $type: "number" },
+    },
+  }
+);
+
+// ✅ ANNUAL unique per household per year
+PaymentTransactionSchema.index(
+  { userId: 1, householdId: 1, kind: 1, targetYear: 1 },
+  {
+    unique: true,
+    name: "uniq_annual_per_household_year",
+    partialFilterExpression: {
+      kind: "ANNUAL",
+      householdId: { $type: "objectId" },
+      targetYear: { $type: "number" },
+    },
+  }
+);
+
+/**
+ * ✅ Coverage lookup (scoped per household now)
+ * Used to find "paid/complete" tx that overlaps coverFrom/coverTo
+ */
+PaymentTransactionSchema.index(
+  { userId: 1, householdId: 1, provider: 1, status: 1, coverFrom: 1, coverTo: 1, kind: 1 },
   { name: "tx_coverage_lookup" }
 );
 
-// For quick month lookup in calendar UI
+/**
+ * ✅ Month lookup for UI (scoped per household now)
+ */
 PaymentTransactionSchema.index(
-  { userId: 1, kind: 1, targetYear: 1, targetMonth: 1, status: 1 },
+  { userId: 1, householdId: 1, kind: 1, targetYear: 1, targetMonth: 1, status: 1 },
   { name: "tx_month_lookup" }
 );
 

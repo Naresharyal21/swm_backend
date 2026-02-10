@@ -292,6 +292,7 @@ router.post("/membership-plans", validate(membershipPlanSchema), ctrl.createMemb
 router.get("/membership-plans", ctrl.listMembershipPlans);
 router.put("/membership-plans/:id", validate(membershipPlanSchema), ctrl.updateMembershipPlan);
 router.delete("/membership-plans/:id", ctrl.deactivateMembershipPlan);
+//admin view payment
 
 // --------------------
 // Reward Rates
@@ -313,5 +314,26 @@ router.get("/reward-rates", ctrl.listRewardRates);
 router.get("/reward-rates/:id", ctrl.getRewardRateById);                    // ✅ added
 router.put("/reward-rates/:id", validate(rewardRateUpdateSchema), ctrl.updateRewardRate); // ✅ added
 router.delete("/reward-rates/:id", ctrl.deleteRewardRate);                  // ✅ added
+
+//admin view payment
+// --------------------
+// Payment Transactions (Admin)
+// --------------------
+router.get(
+  "/payment-transactions",
+  validate(
+    Joi.object({
+      status: Joi.string().optional(),
+      kind: Joi.string().optional(),
+      limit: Joi.number().integer().min(1).max(1000).optional(),
+      skip: Joi.number().integer().min(0).optional(),
+      from: Joi.string().optional(),  // ISO date string
+      to: Joi.string().optional(),    // ISO date string
+      search: Joi.string().allow("").optional(), // email/txUuid/refId
+    })
+  ),
+  ctrl.listPaymentTransactions
+);
+
 
 module.exports = router;
