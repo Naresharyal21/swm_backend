@@ -274,13 +274,33 @@ const createBin = asyncHandler(async (req, res) => {
 })
 
 const listBins = asyncHandler(async (req, res) => {
-  const q = {}
-  if (req.query.householdId) q.householdId = req.query.householdId
-  if (req.query.virtualBinId) q.virtualBinId = req.query.virtualBinId
+  const q = {};
+  if (req.query.householdId) q.householdId = req.query.householdId;
+  if (req.query.virtualBinId) q.virtualBinId = req.query.virtualBinId;
 
-  const items = await Bin.find(q).sort({ createdAt: -1 }).lean()
-  res.json({ items })
-})
+  // ✅ optional filters (ONLY applied if provided)
+  const status = String(req.query.status || "").trim();
+  const onlyActive = req.query.onlyActive === "true" || req.query.onlyActive === true;
+
+  if (status) q.status = status;
+  else if (onlyActive) q.status = "ACTIVE"; // change if your active value differs
+
+  // ✅ pagination (optional)
+  const limit = Math.min(Number(req.query.limit || 500), 2000);
+  const skip = Math.max(Number(req.query.skip || 0), 0);
+
+  const items = await Bin.find(q)
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .lean();
+
+  const total = await Bin.countDocuments(q);
+
+  res.json({ items, total, limit, skip });
+});
+
+
 
 const getBinById = asyncHandler(async (req, res) => {
   const bin = await Bin.findById(req.params.id).lean()

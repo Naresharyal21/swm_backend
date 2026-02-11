@@ -5,7 +5,7 @@ const { validate } = require("../middlewares/validate");
 const { ROLES, VEHICLE_TYPES } = require("../config/constants");
 const ctrl = require("../controllers/admin.controller");
 
-console.log("✅ loaded admin.routes.js from:", __filename);
+
 
 const router = express.Router();
 
@@ -119,8 +119,21 @@ const binUpdateSchema = Joi.object({
 
 
 router.post("/bins", validate(binSchema), ctrl.createBin);
-router.get("/bins", ctrl.listBins);
-router.get("/bins/:id", ctrl.getBinById);                          // ✅ added
+router.get(
+  "/bins",
+  validate(
+    Joi.object({
+      limit: Joi.number().integer().min(1).max(2000).optional(),
+      skip: Joi.number().integer().min(0).optional(),
+
+      // ✅ filter options
+      onlyActive: Joi.boolean().truthy("true").falsy("false").optional(),
+      status: Joi.string().trim().allow("").optional(),
+    })
+  ),
+  ctrl.listBins
+);
+                         
 router.put("/bins/:id", validate(binUpdateSchema), ctrl.updateBin); // ✅ added
 router.delete("/bins/:id", ctrl.deleteBin);                        // ✅ added
 
