@@ -278,26 +278,29 @@ const listBins = asyncHandler(async (req, res) => {
   if (req.query.householdId) q.householdId = req.query.householdId;
   if (req.query.virtualBinId) q.virtualBinId = req.query.virtualBinId;
 
-  // ✅ optional filters (ONLY applied if provided)
-  const status = String(req.query.status || "").trim();
+  const status = String(req.query.status || "").trim().toUpperCase();
   const onlyActive = req.query.onlyActive === "true" || req.query.onlyActive === true;
 
   if (status) q.status = status;
-  else if (onlyActive) q.status = "ACTIVE"; // change if your active value differs
+  else if (onlyActive) q.status = "ACTIVE";
 
-  // ✅ pagination (optional)
   const limit = Math.min(Number(req.query.limit || 500), 2000);
   const skip = Math.max(Number(req.query.skip || 0), 0);
 
-  const items = await Bin.find(q)
-    .sort({ createdAt: -1 })
-    .skip(skip)
-    .limit(limit)
-    .lean();
-
+  const items = await Bin.find(q).sort({ createdAt: -1 }).skip(skip).limit(limit).lean();
   const total = await Bin.countDocuments(q);
 
-  res.json({ items, total, limit, skip });
+  const OFFLINE_AFTER_MIN = Math.max(1, Number(process.env.OFFLINE_AFTER_MIN || 10));
+  const OFFLINE_AFTER_MS = OFFLINE_AFTER_MIN * 60 * 1000;
+  const now = Date.now();
+
+  const computedItems = (items || []).map((b) => {
+    const last = b.lastTelemetryAt ? new Date(b.lastTelemetryAt).getTime() : 0;
+    const isOffline = !last || now - last > OFFLINE_AFTER_MS;
+    return { ...b, isOffline };
+  });
+
+  res.json({ items: computedItems, total, limit, skip });
 });
 
 
