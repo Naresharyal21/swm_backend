@@ -10,6 +10,9 @@ const Invoice = require("../models/Invoice");
 const BillingPlan = require("../models/BillingPlan");
 const BinId = require("../models/BinId");
 
+// ✅ shared iot_devices model (must exist in web server models)
+const Device = require("../models/Device");
+
 const {
   listMembershipPlans,
   subscribeToMembership,
@@ -20,7 +23,7 @@ const {
 const { submitRecyclable, listMyRecyclables } = require("../services/recyclableService");
 const { listNotifications, markAsRead } = require("../services/notificationService");
 const { audit } = require("../services/auditService");
-const { badRequest, notFound } = require("../utils/errors");
+const { badRequest, notFound, forbidden } = require("../utils/errors");
 
 const { createPaymentIntent } = require("../services/paymentService");
 
@@ -72,7 +75,6 @@ const getMyHouseholds = asyncHandler(async (req, res) => {
   const items = await Household.aggregate([
     { $match: { citizenUserId: req.user._id } },
     { $sort: { createdAt: -1 } },
-
     {
       $lookup: {
         from: "bins",
@@ -81,9 +83,7 @@ const getMyHouseholds = asyncHandler(async (req, res) => {
         as: "bins",
       },
     },
-
     { $addFields: { bin: { $arrayElemAt: ["$bins", 0] } } },
-
     {
       $project: {
         _id: 1,
@@ -95,7 +95,6 @@ const getMyHouseholds = asyncHandler(async (req, res) => {
         pickupScheduleDays: 1,
         createdAt: 1,
         updatedAt: 1,
-
         bin: {
           _id: "$bin._id",
           binId: "$bin.binId",
@@ -312,7 +311,6 @@ const cancelMyMembership = asyncHandler(async (req, res) => {
 /* ------------------------------------------------------------------ */
 /* Transactions                                                        */
 /* ------------------------------------------------------------------ */
-// GET /api/citizen/transactions?householdId=...
 const listMyTransactions = asyncHandler(async (req, res) => {
   const userId = req.user._id;
   const { householdId } = req.query || {};
@@ -332,7 +330,8 @@ const listMyTransactions = asyncHandler(async (req, res) => {
 /* Recyclables                                                         */
 /* ------------------------------------------------------------------ */
 const createRecyclableSubmission = asyncHandler(async (req, res) => {
-  const { householdId, category, pieces, avgWeightKg, estimatedTotalWeightKg, scheduledDate } = req.body;
+  const { householdId, category, pieces, avgWeightKg, estimatedTotalWeightKg, scheduledDate } =
+    req.body;
 
   const { submission, case: c, task } = await submitRecyclable({
     userId: req.user._id,
@@ -505,10 +504,7 @@ const deactivateBin = asyncHandler(async (req, res) => {
 /* Zones + virtual bins                                                 */
 /* ------------------------------------------------------------------ */
 const listZones = asyncHandler(async (req, res) => {
-  const items = await Zone.find({})
-    .select("_id name wardCode centroid")
-    .sort({ name: 1 })
-    .lean();
+  const items = await Zone.find({}).select("_id name wardCode centroid").sort({ name: 1 }).lean();
   res.json({ items });
 });
 
@@ -561,10 +557,13 @@ const createHouseholdWithBin = asyncHandler(async (req, res) => {
   const userId = req.user?._id || req.user?.id;
   if (!isObjId(userId)) throw badRequest("Unauthorized");
 
-  const { address, location, binId, zoneId, virtualBinId } = req.body || {};
+  const { address, location, binId, zoneId, virtualBinId, deviceId, deviceKey } = req.body || {};
 
   if (!String(address || "").trim()) throw badRequest("address is required");
   if (!String(binId || "").trim()) throw badRequest("binId is required");
+
+  if (!String(deviceId || "").trim()) throw badRequest("deviceId is required");
+  if (!String(deviceKey || "").trim()) throw badRequest("deviceKey is required");
 
   if (!zoneId || !isObjId(zoneId)) throw badRequest("Valid zoneId is required");
   if (!virtualBinId || !isObjId(virtualBinId)) throw badRequest("Valid virtualBinId is required");
@@ -610,11 +609,57 @@ const createHouseholdWithBin = asyncHandler(async (req, res) => {
       status: "INACTIVE",
     });
   } catch (e) {
-    // rollback household + unreserve BinId
     await Household.deleteOne({ _id: household._id });
-    await BinId.updateOne({ _id: reserved._id }, { $set: { isAssigned: false }, $unset: { assignedAt: 1, assignedTo: 1 } });
+    await BinId.updateOne(
+      { _id: reserved._id },
+      { $set: { isAssigned: false }, $unset: { assignedAt: 1, assignedTo: 1 } }
+    );
 
     if (e && e.code === 11000) throw badRequest("Bin ID already exists. Choose another binId.");
+    throw e;
+  }
+
+  // ✅ Pair device into shared iot_devices (SAFE)
+  try {
+    const did = String(deviceId).trim();
+    const dkey = String(deviceKey).trim();
+
+    const existing = await Device.findOne({ deviceId: did });
+
+    // device is already paired to another bin -> block
+    if (existing?.binId && existing.binId !== bin.binId) {
+      throw badRequest(`Device already paired to binId=${existing.binId}`);
+    }
+
+    // device exists -> require matching key (prevents hijack)
+    if (existing && existing.deviceKey !== dkey) {
+      throw forbidden("Invalid deviceKey for this deviceId");
+    }
+
+    await Device.findOneAndUpdate(
+      { deviceId: did },
+      {
+        $set: {
+          deviceKey: existing ? existing.deviceKey : dkey, // keep original key if exists
+          binId: bin.binId,
+          isActive: true,
+          pairedAt: new Date(),
+        },
+      },
+      { upsert: true, new: true }
+    );
+  } catch (e) {
+    // rollback everything if pairing fails
+    await Bin.deleteOne({ _id: bin._id });
+    await Household.deleteOne({ _id: household._id });
+    await BinId.updateOne(
+      { _id: reserved._id },
+      { $set: { isAssigned: false }, $unset: { assignedAt: 1, assignedTo: 1 } }
+    );
+
+    if (e && e.code === 11000)
+      throw badRequest("Device pairing failed: duplicate deviceId or bin already paired");
+
     throw e;
   }
 
@@ -647,7 +692,25 @@ const deleteHousehold = asyncHandler(async (req, res) => {
     throw badRequest("Household has bins. Use cascade=1 or delete bins first.");
   }
 
+  let deletedDevices = 0;
+
   if (cascade) {
+    // find bins before deleting, so we can clean iot_devices + binids
+    const bins = await Bin.find({ householdId }).select("_id binId").lean();
+    const binIds = (bins || []).map((b) => b.binId).filter(Boolean);
+
+    if (binIds.length) {
+      // ✅ HARD DELETE paired device records
+      const del = await Device.deleteMany({ binId: { $in: binIds } });
+      deletedDevices = del?.deletedCount || 0;
+
+      // ✅ OPTIONAL: make BinId available again (turn off if you never want reuse)
+      await BinId.updateMany(
+        { code: { $in: binIds } },
+        { $set: { isAssigned: false }, $unset: { assignedAt: 1, assignedTo: 1 } }
+      );
+    }
+
     await Bin.deleteMany({ householdId });
   }
 
@@ -661,7 +724,11 @@ const deleteHousehold = asyncHandler(async (req, res) => {
     req,
   });
 
-  res.json({ ok: true, deletedBins: cascade ? binsCount : 0 });
+  res.json({
+    ok: true,
+    deletedBins: cascade ? binsCount : 0,
+    deletedDevices: cascade ? deletedDevices : 0,
+  });
 });
 
 /* ------------------------------------------------------------------ */

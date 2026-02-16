@@ -25,11 +25,11 @@ router.use(requireRole(ROLES.CITIZEN));
 
 const locationSchema = Joi.object({
   type: Joi.string().valid("Point").default("Point"),
-  coordinates: Joi.array().items(Joi.number()).length(2).required(),
+  coordinates: Joi.array().items(Joi.number()).length(2).required(), // [lng, lat]
 });
 
 /* ------------------------------------------------------------------ */
-/* NEW: Citizen selectable zones + virtual bins                        */
+/* Citizen selectable zones + virtual bins                              */
 /* ------------------------------------------------------------------ */
 
 // Zones created by admin (dropdown)
@@ -47,7 +47,7 @@ router.get(
 );
 
 /* ------------------------------------------------------------------ */
-/* NEW: One-step create Household + Bin (INACTIVE)                      */
+/* ✅ One-step create Household + Bin (INACTIVE) + Pair Device           */
 /* ------------------------------------------------------------------ */
 
 router.post(
@@ -59,6 +59,10 @@ router.post(
       address: Joi.string().min(2).required(),
       binId: Joi.string().min(1).required(),
       location: locationSchema.required(),
+
+      // ✅ required for pairing (controller enforces)
+      deviceId: Joi.string().min(1).required(),
+      deviceKey: Joi.string().min(1).required(),
     })
   ),
   ctrl.createHouseholdWithBin
@@ -100,12 +104,10 @@ router.post(
 );
 
 router.get("/wallet", ctrl.walletSummary);
-
-// Existing invoices endpoint
 router.get("/invoices", ctrl.listInvoices);
 
 /* ------------------------------------------------------------------ */
-/* ✅ FIXED: Transactions endpoint (SAFE, NO populate, no crash)         */
+/* Transactions                                                         */
 /* ------------------------------------------------------------------ */
 /**
  * GET /api/citizen/transactions
@@ -130,7 +132,7 @@ router.get("/transactions", async (req, res, next) => {
 // Billing plans (monthly + daily)
 router.get("/billing-plans", ctrl.listBillingPlans);
 
-// list the household per citizen (for dropdown)
+// list one household per citizen (legacy)
 router.get("/household/me", ctrl.getMyHousehold);
 
 // Citizen households (for dropdown)
@@ -157,7 +159,7 @@ router.put(
 );
 
 /* ------------------------------------------------------------------ */
-/* NEW: Cascade delete Household (+ bins if cascade=1)                  */
+/* Cascade delete Household (+ bins if cascade=1)                       */
 /* ------------------------------------------------------------------ */
 
 router.delete(
@@ -171,7 +173,7 @@ router.delete(
 );
 
 /* ------------------------------------------------------------------ */
-/* Membership                                                          */
+/* Membership                                                           */
 /* ------------------------------------------------------------------ */
 
 router.get("/memberships/plans", ctrl.listMemberships);
@@ -190,7 +192,7 @@ router.post(
 );
 
 /* ------------------------------------------------------------------ */
-/* Recyclable submission (non-disposal waste)                           */
+/* Recyclable submission                                                */
 /* ------------------------------------------------------------------ */
 
 router.post(
@@ -228,16 +230,11 @@ router.post(
   ctrl.payInvoice
 );
 
-/* ------------------------------------------------------------------ */
-/* ✅ Activate bin after payment (Option A)                              */
-/* ------------------------------------------------------------------ */
-
 router.post(
   "/activate-bin",
   validate(Joi.object({ householdId: Joi.string().required(), planId: Joi.string().required() })),
   ctrl.activateBinAfterPayment
 );
-//deactivate bins
 
 router.post(
   "/deactivate-bin",
@@ -245,9 +242,8 @@ router.post(
   ctrl.deactivateBin
 );
 
-
 /* ------------------------------------------------------------------ */
-/* NEW: Available Bin IDs for citizen (unassigned only)                 */
+/* Available Bin IDs for citizen (unassigned only)                      */
 /* ------------------------------------------------------------------ */
 
 router.get(
@@ -261,8 +257,5 @@ router.get(
   ),
   ctrl.listAvailableBinIds
 );
-
-
-
 
 module.exports = router;
